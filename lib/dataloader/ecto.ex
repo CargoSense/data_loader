@@ -306,9 +306,12 @@ if Code.ensure_loaded?(Ecto) do
         |> Keyword.put_new(:query, &query/2)
         |> Keyword.put_new(:run_batch, &run_batch(repo, &1, &2, &3, &4, &5))
 
-      opts = Keyword.take(opts, [:timeout])
-
-      %__MODULE__{repo: repo, options: opts}
+      %__MODULE__{
+        repo: repo,
+        options: [
+          timeout: opts[:timeout] || Dataloader.default_timeout()
+        ]
+      }
       |> struct(data)
     end
 
@@ -378,8 +381,34 @@ if Code.ensure_loaded?(Ecto) do
     end
 
     defimpl Dataloader.Source do
-      def run(source) do
-        results = Dataloader.async_safely(__MODULE__, :run_batches, [source])
+      def run(source, dataloader) do
+        options = [
+          timeout: source.options[:timeout] || Dataloader.default_timeout(),
+          on_timeout: :kill_task
+        ]
+
+        results =
+          Dataloader.Async.tasks(
+            dataloader,
+            source.batches,
+            fn batch ->
+              id = :erlang.unique_integer()
+              system_time = System.system_time()
+              start_time_mono = System.monotonic_time()
+
+              emit_start_event(id, system_time, batch)
+              {_key, batch_result} = run_batch(batch, source)
+              emit_stop_event(id, start_time_mono, batch)
+
+              batch_result
+            end,
+            options
+          )
+
+        results =
+          results
+          |> Enum.map(fn {{key, _set}, v} -> {key, v} end)
+          |> Map.new()
 
         results =
           Map.merge(source.results, results, fn _, {:ok, v1}, {:ok, v2} ->
@@ -581,39 +610,6 @@ if Code.ensure_loaded?(Ecto) do
 
       defp normalize_key(key, default_params) do
         {key, default_params}
-      end
-
-      def run_batches(source) do
-        options = [
-          timeout: source.options[:timeout] || Dataloader.default_timeout(),
-          on_timeout: :kill_task
-        ]
-
-        results =
-          source.batches
-          |> Task.async_stream(
-            fn batch ->
-              id = :erlang.unique_integer()
-              system_time = System.system_time()
-              start_time_mono = System.monotonic_time()
-
-              emit_start_event(id, system_time, batch)
-              batch_result = run_batch(batch, source)
-              emit_stop_event(id, start_time_mono, batch)
-
-              batch_result
-            end,
-            options
-          )
-          |> Enum.map(fn
-            {:ok, {_key, result}} -> {:ok, result}
-            {:exit, reason} -> {:error, reason}
-          end)
-
-        source.batches
-        |> Enum.map(fn {key, _set} -> key end)
-        |> Enum.zip(results)
-        |> Map.new()
       end
 
       defp run_batch(
