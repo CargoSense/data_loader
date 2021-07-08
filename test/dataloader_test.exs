@@ -281,4 +281,14 @@ defmodule DataloaderTest do
       assert log =~ "hell"
     end
   end
+
+  test "that already added sources can be identified" do
+    source = Dataloader.KV.new(fn _, ids -> Enum.with_index(ids) end)
+
+    loader =
+      Dataloader.new
+      |> Dataloader.add_source(:foo, source)
+
+    assert Dataloader.has_source?(loader, :foo)
+  end
 end
